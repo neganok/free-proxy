@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 class QuanLyProxy:
     def __init__(self):
-        # Danh sách nguồn lấy proxy (đã bổ sung thêm nguồn)
+        # Danh sách nguồn lấy proxy
         self.nguon_proxy = {
             'http': [
                 'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=ipport&format=text&protocol=http',
@@ -32,9 +32,10 @@ class QuanLyProxy:
                 'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=ipport&format=text&protocol=socks5'
             ]
         }
-        self.danh_sach_proxy = defaultdict(set)  # Dùng set để tự động loại bỏ trùng lặp
+        self.danh_sach_proxy = defaultdict(set)
         self.proxy_theo_quoc_gia = defaultdict(lambda: defaultdict(list))
         self.geoip_reader = self._khoi_tao_geoip()
+        self.thu_muc_goc = 'proxies'  # Đổi tên thư mục chính thành 'proxies'
 
     def _khoi_tao_geoip(self):
         """Khởi tạo cơ sở dữ liệu GeoIP"""
@@ -74,9 +75,8 @@ class QuanLyProxy:
         for loai_proxy, danh_sach_url in self.nguon_proxy.items():
             for url in danh_sach_url:
                 try:
-                    phan_hoi = requests.get(url)
+                    phan_hoi = requests.get(url, timeout=30)
                     if phan_hoi.status_code == 200:
-                        # Lọc và chỉ lấy các proxy hợp lệ
                         proxies = {p for p in re.findall(r'\d{1,3}(?:\.\d{1,3}){3}:\d{2,5}', phan_hoi.text) if p}
                         self.danh_sach_proxy[loai_proxy].update(proxies)
                         logger.info(f"Đã thêm {len(proxies)} proxy {loai_proxy.upper()} từ {url}")
@@ -109,30 +109,30 @@ class QuanLyProxy:
 
     def luu_proxy(self):
         """Lưu proxy vào thư mục đã được tổ chức"""
-        # Tạo thư mục chính
-        os.makedirs('proxy/tong_hop', exist_ok=True)
-        os.makedirs('proxy/quoc_gia', exist_ok=True)
+        # Tạo thư mục chính (đổi thành 'proxies')
+        os.makedirs(f'{self.thu_muc_goc}/tong_hop', exist_ok=True)
+        os.makedirs(f'{self.thu_muc_goc}/quoc_gia', exist_ok=True)
         
         # Lưu tất cả proxy (đã loại bỏ trùng)
-        with open('proxy/tong_hop/all.txt', 'w') as f:
+        with open(f'{self.thu_muc_goc}/tong_hop/all.txt', 'w') as f:
             for loai_proxy in self.danh_sach_proxy.values():
                 f.write('\n'.join(loai_proxy) + '\n')
         
         # Lưu theo loại proxy
         for loai_proxy, danh_sach in self.danh_sach_proxy.items():
-            with open(f'proxy/tong_hop/{loai_proxy}.txt', 'w') as f:
+            with open(f'{self.thu_muc_goc}/tong_hop/{loai_proxy}.txt', 'w') as f:
                 f.write('\n'.join(danh_sach))
         
         # Lưu theo quốc gia và loại proxy
         for quoc_gia, cac_loai in self.proxy_theo_quoc_gia.items():
-            ten_thu_muc = f'proxy/quoc_gia/{self._chuan_hoa_ten(quoc_gia)}'
+            ten_thu_muc = f'{self.thu_muc_goc}/quoc_gia/{self._chuan_hoa_ten(quoc_gia)}'
             os.makedirs(ten_thu_muc, exist_ok=True)
             
             for loai_proxy, danh_sach in cac_loai.items():
                 with open(f'{ten_thu_muc}/{loai_proxy.upper()}.txt', 'w') as f:
                     f.write('\n'.join(danh_sach))
         
-        logger.info("Đã lưu proxy thành công")
+        logger.info(f"Đã lưu proxy thành công vào thư mục '{self.thu_muc_goc}'")
 
     def _chuan_hoa_ten(self, ten):
         """Chuẩn hóa tên thư mục"""
