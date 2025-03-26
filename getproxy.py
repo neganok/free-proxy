@@ -5,7 +5,6 @@ import os
 import sys
 from collections import defaultdict
 import geoip2.database
-from bs4 import BeautifulSoup
 import logging
 
 # Cấu hình hệ thống logging
@@ -24,11 +23,11 @@ class DownloadProxies:
             'socks5': [''],
             'http': ['https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=ipport&format=text']
         }
-        self.proxy_dict = defaultdict(set)  # Lưu trữ proxy theo loại
-        self.country_proxies = defaultdict(list)  # Lưu trữ proxy theo quốc gia
-        self.semaphore = asyncio.Semaphore(500)  # Giới hạn kết nối đồng thời
-        self.ip_country_cache = {}  # Cache lưu trữ IP và quốc gia
-        self.geoip_readers = self.setup_geoip()  # Khởi tạo GeoIP reader
+        self.proxy_dict = defaultdict(set)
+        self.country_proxies = defaultdict(list)
+        self.semaphore = asyncio.Semaphore(500)
+        self.ip_country_cache = {}
+        self.geoip_readers = self.setup_geoip()
 
     def setup_geoip(self):
         """Thiết lập cơ sở dữ liệu GeoIP"""
@@ -88,11 +87,27 @@ class DownloadProxies:
         async with aiohttp.ClientSession() as session:
             tasks = []
             for proxy_type, apis in self.api.items():
-                for api in apis: tasks.append(self.fetch_proxies(session, proxy_type, api))
+                for api in apis:
+                    if api:  # Chỉ thêm task nếu API không rỗng
+                        tasks.append(self._fetch_proxies(session, proxy_type, api))
             await asyncio.gather(*tasks)
         self.proxy_dict = {k: list(v) for k, v in self.proxy_dict.items()}
         for proxy_type in self.proxy_dict:
             logger.info(f"Tổng số {proxy_type.upper()} proxy nhận được: {len(self.proxy_dict[proxy_type])}")
+
+    async def _fetch_proxies(self, session, proxy_type, api):
+        """Hàm phụ trợ để lấy proxy từ API"""
+        try:
+            async with self.semaphore:
+                async with session.get(api, timeout=15) as response:
+                    if response.status == 200:
+                        text = await response.text()
+                        proxy_list = re.findall(r'\d{1,3}(?:\.\d{1,3}){3}:\d{2,5}', text)
+                        if proxy_list:
+                            self.proxy_dict[proxy_type].update(proxy_list)
+                            logger.info(f"> Đã nhận {len(proxy_list)} {proxy_type.upper()} proxy từ {api}")
+        except Exception as e:
+            logger.error(f"Lỗi khi tải từ {api}: {e}")
 
     def ip_to_country_local(self, ip):
         """Xác định quốc gia từ IP"""
@@ -100,22 +115,6 @@ class DownloadProxies:
             response = self.geoip_readers['country'].country(ip)
             country = response.country.name or 'Không xác định'
             return country
-        except Exception: return 'Không xác định'
-
-    def ip_to_city_local(self, ip):
-        """Xác định thành phố từ IP"""
-        try:
-            response = self.geoip_readers['city'].city(ip)
-            city = response.city.name or 'Không xác định'
-            return city
-        except Exception: return 'Không xác định'
-
-    def ip_to_asn_local(self, ip):
-        """Xác định ASN từ IP"""
-        try:
-            response = self.geoip_readers['asn'].asn(ip)
-            asn = response.autonomous_system_organization or 'Không xác định'
-            return asn
         except Exception: return 'Không xác định'
 
     async def sort_proxies_by_country(self):
@@ -149,74 +148,17 @@ class DownloadProxies:
             except Exception as e:
                 logger.error(f"Lỗi khi lưu proxy cho {country}: {e}")
 
-    def save_all_proxies(self):
-        """Lưu tất cả proxy theo loại"""
-        os.makedirs('proxies', exist_ok=True)
-        file_paths = {
-            'http': os.path.join('proxies', 'http.txt'),
-            'socks4': os.path.join('proxies', 'socks4.txt'),
-            'socks5': os.path.join('proxies', 'socks5.txt'),
-            'all': os.path.join('proxies', 'all.txt')
-        }
-      
-        for proxy_type, proxies in self.proxy_dict.items():
-            try:
-                with open(file_paths[proxy_type], 'w') as type_file: type_file.write('\n'.join(proxies))
-                logger.info(f"Đã lưu {proxy_type.upper()} proxy vào {file_paths[proxy_type]}")
-            except Exception as e: logger.error(f"Lỗi khi lưu {proxy_type.upper()} proxy: {e}")
-
-        all_proxies = set()
-        for proxies in self.proxy_dict.values(): all_proxies.update(proxies)
-        try:
-            with open(file_paths['all'], 'w') as all_file: all_file.write('\n'.join(all_proxies))
-            logger.info(f"Đã lưu tất cả proxy vào {file_paths['all']}")
-        except Exception as e: logger.error(f"Lỗi khi lưu tất cả proxy: {e}")
-
-    async def validate_proxy(self, session, proxy):
-        """Kiểm tra proxy có hoạt động không"""
-        test_url = 'http://www.google.com'
-        try:
-            async with session.get(test_url, proxy=f'http://{proxy}', timeout=5): return True
-        except: return False
-
-    async def validate_single_proxy(self, session, proxy_type, proxy):
-        """Kiểm tra từng proxy"""
-        is_valid = await self.validate_proxy(session, proxy)
-        return proxy_type, proxy, is_valid
-
-    async def validate_proxies(self):
-        """Kiểm tra tất cả proxy"""
-        valid_proxies = defaultdict(set)
-        async with aiohttp.ClientSession() as session:
-            tasks = []
-            for proxy_type, proxies in self.proxy_dict.items():
-                for proxy in proxies: tasks.append(self.validate_single_proxy(session, proxy_type, proxy))
-            results = await asyncio.gather(*tasks)
-            for proxy_type, proxy, is_valid in results:
-                if is_valid: valid_proxies[proxy_type].add(proxy)
-        self.proxy_dict = valid_proxies
-        logger.info("Đã hoàn thành kiểm tra proxy.")
-
     async def execute(self):
         """Thực thi toàn bộ quy trình"""
         logger.info("Bắt đầu tải proxy...")
         await self.get_proxies()
-        logger.info("Hoàn thành tải proxy.")
-
+        
         logger.info("Bắt đầu phân loại proxy theo quốc gia...")
         await self.sort_proxies_by_country()
-
-        logger.info("Bắt đầu kiểm tra proxy...")
-        await self.validate_proxies()
-
-        logger.info("Đã hoàn thành phân loại và kiểm tra proxy.")
-
+        
         logger.info("Bắt đầu lưu proxy theo quốc gia...")
         self.save_proxies_by_country()
-
-        logger.info("Bắt đầu lưu tất cả proxy...")
-        self.save_all_proxies()
-
+        
         logger.info("Đã hoàn thành tất cả thao tác.")
 
     def close(self):
