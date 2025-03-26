@@ -23,13 +23,13 @@ class DownloadProxies:
     def __init__(self) -> None:
         self.api = {
             'socks4': [
-                'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt',
+                '',
             ],
             'socks5': [
-                'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt',
+                '',
             ],
             'http': [
-                'https://proxyspace.pro/http.txt',
+                'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=ipport&format=text',
             ]
         }
         self.proxy_dict = defaultdict(set)
