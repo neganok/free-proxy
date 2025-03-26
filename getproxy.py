@@ -1,288 +1,102 @@
 import asyncio
 import aiohttp
-import re
 import os
-import sys
-from collections import defaultdict
 import geoip2.database
-from bs4 import BeautifulSoup
-import logging
+from collections import defaultdict
 
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        
-    ]
-)
-logger = logging.getLogger(__name__)
-
-class DownloadProxies:
-    def __init__(self) -> None:
-        self.api = {
-            'socks4': [
-                '',
-            ],
-            'socks5': [
-                '',
-            ],
-            'http': [
-                'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=ipport&format=text',
-            ]
-        }
-        self.proxy_dict = defaultdict(set)
+class ProxySorter:
+    def __init__(self):
+        # Cấu hình database GeoIP
+        self.geoip_db = 'GeoLite2-Country.mmdb'
+        self.proxy_dict = defaultdict(list)
         self.country_proxies = defaultdict(list)
-       
-        self.semaphore = asyncio.Semaphore(500)
-        self.ip_country_cache = {}
-        self.geoip_readers = self.setup_geoip()
+        
+        # Kiểm tra và tải GeoIP database nếu chưa có
+        if not os.path.exists(self.geoip_db):
+            self.download_geoip_database()
+            
+        self.geoip_reader = geoip2.database.Reader(self.geoip_db)
 
-    def setup_geoip(self):
-        geoip_db_paths = {
-            'country': 'GeoLite2-Country.mmdb',
-            'city': 'GeoLite2-City.mmdb',
-            'asn': 'GeoLite2-ASN.mmdb'
-        }
-        download_urls = {
-            'country': [
-                'https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-Country.mmdb',
-                'https://git.io/GeoLite2-Country.mmdb'
-            ],
-            'city': [
-                'https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-City.mmdb',
-                'https://git.io/GeoLite2-City.mmdb'
-            ],
-            'asn': [
-                'https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-ASN.mmdb',
-                'https://git.io/GeoLite2-ASN.mmdb'
-            ]
-        }
-        readers = {}
-        for key, path in geoip_db_paths.items():
-            if not os.path.exists(path):
-                logger.info(f"Файл {path} не найден. Начало скачивания.")
-                success = self.download_geoip_database(key, path, download_urls[key])
-                if not success:
-                    logger.error(f"Не удалось скачать {path}. Завершение работы.")
-                    sys.exit(1)
-            try:
-                readers[key] = geoip2.database.Reader(path)
-                logger.info(f"Загружен {key} GeoIP database из {path}.")
-            except Exception as e:
-                logger.error(f"Ошибка загрузки {path}: {e}")
-                sys.exit(1)
-        return readers
-
-    def download_geoip_database(self, key, path, urls):
-        for url in urls:
-            try:
-                logger.info(f"Попытка скачать {path} с {url}")
-                response = requests.get(url, timeout=30)
-                if response.status_code == 200:
-                    with open(path, 'wb') as f:
-                        f.write(response.content)
-                    logger.info(f"Успешно скачан {path} с {url}")
-                    return True
-                else:
-                    logger.warning(f"Не удалось скачать {path} с {url}. Статус код: {response.status_code}")
-            except Exception as e:
-                logger.warning(f"Ошибка при скачивании {path} с {url}: {e}")
-        return False
-
-    async def fetch_proxies(self, session, proxy_type, api):
+    def download_geoip_database(self):
+        """Tải GeoIP database nếu chưa có"""
+        import requests
+        url = 'https://git.io/GeoLite2-Country.mmdb'
         try:
-            async with self.semaphore:
-                async with session.get(api, timeout=15) as response:
-                    if response.status == 200:
-                        if any(domain in api for domain in ['spys.me', 'hidemy.name', 'proxynova.com', 'proxy-listen.de']):
-                            # Обработка HTML-страниц
-                            text = await response.text()
-                            proxy_list = self.parse_html_proxies(text)
-                        else:
-                            text = await response.text()
-                            proxy_list = re.findall(r'\d{1,3}(?:\.\d{1,3}){3}:\d{2,5}', text)
-                        if proxy_list:
-                            self.proxy_dict[proxy_type].update(proxy_list)
-                            logger.info(f"> Получено {len(proxy_list)} {proxy_type.upper()} прокси из {api}")
+            print("Đang tải GeoIP database...")
+            r = requests.get(url, timeout=30)
+            with open(self.geoip_db, 'wb') as f:
+                f.write(r.content)
+            print("Đã tải xong GeoIP database")
         except Exception as e:
-            logger.error(f"Ошибка при загрузке из {api}: {e}")
+            print(f"Lỗi khi tải GeoIP database: {e}")
+            exit(1)
 
-    def parse_html_proxies(self, html_text):
-        proxies = []
+    def ip_to_country(self, ip):
+        """Xác định quốc gia từ địa chỉ IP"""
         try:
-            soup = BeautifulSoup(html_text, 'html.parser')
-            # Пример для сайтов с таблицей прокси
-            for row in soup.find_all('tr'):
-                cols = row.find_all(['td', 'li'])
-                if cols:
-                    for col in cols:
-                        proxy = col.get_text(strip=True)
-                        if re.match(r'\d{1,3}(?:\.\d{1,3}){3}:\d{2,5}', proxy):
-                            proxies.append(proxy)
-        except Exception as e:
-            logger.error(f"Ошибка при парсинге HTML: {e}")
-        return proxies
+            response = self.geoip_reader.country(ip)
+            return response.country.name or 'Không xác định'
+        except:
+            return 'Không xác định'
 
-    async def get_proxies(self):
-        async with aiohttp.ClientSession() as session:
-            tasks = []
-            for proxy_type, apis in self.api.items():
-                for api in apis:
-                    tasks.append(self.fetch_proxies(session, proxy_type, api))
-            await asyncio.gather(*tasks)
+    async def load_proxies(self, file_path):
+        """Đọc danh sách proxy từ file"""
+        with open(file_path, 'r') as f:
+            proxies = f.read().splitlines()
+        
+        # Phân loại proxy theo loại (http/socks4/socks5)
+        for proxy in proxies:
+            if proxy:  # Bỏ qua dòng trống
+                parts = proxy.split()
+                if len(parts) >= 2:
+                    proxy_type = parts[0].lower()
+                    proxy_addr = parts[1]
+                    self.proxy_dict[proxy_type].append(proxy_addr)
 
-        # Преобразование сетов в списки
-        self.proxy_dict = {k: list(v) for k, v in self.proxy_dict.items()}
-        for proxy_type in self.proxy_dict:
-            logger.info(f"Всего {proxy_type.upper()} прокси получено: {len(self.proxy_dict[proxy_type])}")
-
-    def ip_to_country_local(self, ip):
-        try:
-            response = self.geoip_readers['country'].country(ip)
-            country = response.country.name or 'Unknown'
-            return country
-        except Exception:
-            return 'Unknown'
-
-    def ip_to_city_local(self, ip):
-        try:
-            response = self.geoip_readers['city'].city(ip)
-            city = response.city.name or 'Unknown'
-            return city
-        except Exception:
-            return 'Unknown'
-
-    def ip_to_asn_local(self, ip):
-        try:
-            response = self.geoip_readers['asn'].asn(ip)
-            asn = response.autonomous_system_organization or 'Unknown'
-            return asn
-        except Exception:
-            return 'Unknown'
-
-    async def sort_proxies_by_country(self):
-        loop = asyncio.get_event_loop()
-        unique_ips = set(proxy.split(':')[0] for proxies in self.proxy_dict.values() for proxy in proxies)
-        ip_to_country_map = {}
-
-        tasks = [loop.run_in_executor(None, self.ip_to_country_local, ip) for ip in unique_ips]
-        countries = await asyncio.gather(*tasks)
-
-        ip_to_country_map = {ip: country for ip, country in zip(unique_ips, countries)}
-
+    async def sort_by_country(self):
+        """Phân loại proxy theo quốc gia"""
         for proxy_type, proxies in self.proxy_dict.items():
             for proxy in proxies:
-                ip, port = proxy.split(':')
-                country = ip_to_country_map.get(ip, 'Unknown')
-                if country != 'Unknown':
-                    # Сохраняем кортеж (протокол, прокси)
-                    self.country_proxies[country].append((proxy_type, proxy))
+                ip = proxy.split(':')[0]
+                country = self.ip_to_country(ip)
+                if country != 'Không xác định':
+                    self.country_proxies[country].append(f"{proxy_type.upper()} {proxy}")
 
-        logger.info("Прокси отсортированы по странам.")
-
-    def save_proxies_by_country(self):
-        os.makedirs('world', exist_ok=True)
+    def save_to_files(self):
+        """Lưu proxy đã phân loại vào thư mục theo quốc gia"""
+        os.makedirs('Proxy_Theo_Quoc_Gia', exist_ok=True)
+        
         for country, proxies in self.country_proxies.items():
-            safe_country = re.sub(r'[\\/*?:"<>|]', "_", country)
-            country_dir = os.path.join('world', safe_country)
+            # Tạo tên thư mục an toàn
+            safe_country = ''.join(c if c.isalnum() else '_' for c in country)
+            country_dir = os.path.join('Proxy_Theo_Quoc_Gia', safe_country)
+            
             os.makedirs(country_dir, exist_ok=True)
-            file_path = os.path.join(country_dir, 'proxies.txt')
-            try:
-                with open(file_path, 'w') as f:
-                    for proxy_type, proxy in proxies:
-                        f.write(f"{proxy_type.upper()} {proxy}\n")
-                logger.info(f"Сохранены прокси для {country} в {country_dir}")
-            except Exception as e:
-                logger.error(f"Ошибка при сохранении прокси для {country}: {e}")
-
-    def save_all_proxies(self):
-        os.makedirs('proxies', exist_ok=True)
-
-        file_paths = {
-            'http': os.path.join('proxies', 'http.txt'),
-            'socks4': os.path.join('proxies', 'socks4.txt'),
-            'socks5': os.path.join('proxies', 'socks5.txt'),
-            'all': os.path.join('proxies', 'all.txt')
-        }
-
-      
-        for proxy_type, proxies in self.proxy_dict.items():
-            try:
-                with open(file_paths[proxy_type], 'w') as type_file:
-                    type_file.write('\n'.join(proxies))
-                logger.info(f"Сохранены {proxy_type.upper()} прокси в {file_paths[proxy_type]}")
-            except Exception as e:
-                logger.error(f"Ошибка при сохранении {proxy_type.upper()} прокси: {e}")
-
-       
-        all_proxies = set()
-        for proxies in self.proxy_dict.values():
-            all_proxies.update(proxies)
-        try:
-            with open(file_paths['all'], 'w') as all_file:
-                all_file.write('\n'.join(all_proxies))
-            logger.info(f"Сохранены все прокси в {file_paths['all']}")
-        except Exception as e:
-            logger.error(f"Ошибка при сохранении всех прокси: {e}")
-
-    async def validate_proxy(self, session, proxy):
-        test_url = 'http://www.google.com'
-        try:
-            async with session.get(test_url, proxy=f'http://{proxy}', timeout=5):
-                return True
-        except:
-            return False
-
-    async def validate_single_proxy(self, session, proxy_type, proxy):
-        is_valid = await self.validate_proxy(session, proxy)
-        return proxy_type, proxy, is_valid
-
-    async def validate_proxies(self):
-        valid_proxies = defaultdict(set)
-        async with aiohttp.ClientSession() as session:
-            tasks = []
-            for proxy_type, proxies in self.proxy_dict.items():
-                for proxy in proxies:
-                    tasks.append(self.validate_single_proxy(session, proxy_type, proxy))
-            results = await asyncio.gather(*tasks)
-            for proxy_type, proxy, is_valid in results:
-                if is_valid:
-                    valid_proxies[proxy_type].add(proxy)
-        self.proxy_dict = valid_proxies
-        logger.info("Валидация прокси завершена.")
-
-    async def execute(self):
-        logger.info("Начало загрузки прокси...")
-        await self.get_proxies()
-        logger.info("Загрузка прокси завершена.")
-
-        logger.info("Начало сортировки прокси по странам...")
-        await self.sort_proxies_by_country()
-
-        logger.info("Начало валидации прокси...")
-        await self.validate_proxies()
-
-        logger.info("Сортировка и валидация прокси завершены.")
-
-        logger.info("Начало сохранения прокси по странам...")
-        self.save_proxies_by_country()
-
-        logger.info("Начало сохранения всех прокси...")
-        self.save_all_proxies()
-
-        logger.info("Все операции завершены.")
+            with open(os.path.join(country_dir, 'proxies.txt'), 'w') as f:
+                f.write('\n'.join(proxies))
+            
+            print(f"Đã lưu {len(proxies)} proxy cho {country}")
 
     def close(self):
-        for reader in self.geoip_readers.values():
-            reader.close()
+        """Đóng kết nối GeoIP database"""
+        self.geoip_reader.close()
+
+async def main():
+    sorter = ProxySorter()
+    
+    try:
+        # Đọc file proxy đầu vào (tạo file này trước khi chạy)
+        await sorter.load_proxies('all_proxies.txt')
+        
+        # Phân loại theo quốc gia
+        await sorter.sort_by_country()
+        
+        # Lưu kết quả
+        sorter.save_to_files()
+        
+        print("Hoàn thành phân loại proxy!")
+    finally:
+        sorter.close()
 
 if __name__ == '__main__':
-    import requests  
-
-    d = DownloadProxies()
-    try:
-        asyncio.run(d.execute())
-    finally:
-        d.close()
+    asyncio.run(main())
