@@ -83,40 +83,6 @@ class DownloadProxies:
                 logger.warning(f"Lỗi khi tải {path} từ {url}: {e}")
         return False
 
-    async def fetch_proxies(self, session, proxy_type, api):
-        """Lấy danh sách proxy từ API"""
-        try:
-            async with self.semaphore:
-                async with session.get(api, timeout=15) as response:
-                    if response.status == 200:
-                        if any(domain in api for domain in ['spys.me', 'hidemy.name', 'proxynova.com', 'proxy-listen.de']):
-                            text = await response.text()
-                            proxy_list = self.parse_html_proxies(text)
-                        else:
-                            text = await response.text()
-                            proxy_list = re.findall(r'\d{1,3}(?:\.\d{1,3}){3}:\d{2,5}', text)
-                        if proxy_list:
-                            self.proxy_dict[proxy_type].update(proxy_list)
-                            logger.info(f"> Đã nhận {len(proxy_list)} {proxy_type.upper()} proxy từ {api}")
-        except Exception as e:
-            logger.error(f"Lỗi khi tải từ {api}: {e}")
-
-    def parse_html_proxies(self, html_text):
-        """Phân tích HTML để trích xuất proxy"""
-        proxies = []
-        try:
-            soup = BeautifulSoup(html_text, 'html.parser')
-            for row in soup.find_all('tr'):
-                cols = row.find_all(['td', 'li'])
-                if cols:
-                    for col in cols:
-                        proxy = col.get_text(strip=True)
-                        if re.match(r'\d{1,3}(?:\.\d{1,3}){3}:\d{2,5}', proxy):
-                            proxies.append(proxy)
-        except Exception as e:
-            logger.error(f"Lỗi khi phân tích HTML: {e}")
-        return proxies
-
     async def get_proxies(self):
         """Lấy tất cả proxy từ các API"""
         async with aiohttp.ClientSession() as session:
